@@ -1,8 +1,8 @@
 import os
 import ollama
 import chromadb
+from search import build_bm25_index, hybrid_search, semantic_search, rewrite_query
 
-EMBED_MODEL = "nomic-embed-text"
 CHAT_MODEL = "llama3.1:8b"
 TOP_K = 10
 MAX_HISTORY_TURNS = 3
@@ -11,14 +11,6 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "..", "database")
 
 def list_collections(client: chromadb.PersistentClient) -> list[str]:
     return [c.name for c in client.list_collections()]
-
-
-def search(collection, query_vector: list[float], top_k: int) -> list[dict]:
-    results = collection.query(query_embeddings=[query_vector], n_results=top_k)
-    chunks = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        chunks.append({"text": doc, "page": meta["page"], "source": meta["source"]})
-    return chunks
 
 
 def build_prompt(chunks: list[dict], question: str, history: list[dict] = None) -> str:
@@ -45,7 +37,7 @@ def build_prompt(chunks: list[dict], question: str, history: list[dict] = None) 
     )
 
 
-def chat(collection_name: str):
+def chat(collection_name: str, search_mode: str = "hybrid"):
     client = chromadb.PersistentClient(path=DB_PATH)
     available = list_collections(client)
 
@@ -59,7 +51,13 @@ def chat(collection_name: str):
         return
 
     collection = client.get_collection(name=collection_name)
-    print(f"Chatting with '{collection_name}'. Type 'exit' to quit.\n")
+    print(f"Chatting with '{collection_name}' [{search_mode} search]. Type 'exit' to quit.\n")
+
+    bm25, all_docs, all_metas = None, None, None
+    if search_mode == "hybrid":
+        print("Building BM25 index...", end=" ", flush=True)
+        bm25, all_docs, all_metas = build_bm25_index(collection)
+        print("ready.\n")
 
     history = []  # list of {"role": "user"|"assistant", "content": str}
 
@@ -68,8 +66,14 @@ def chat(collection_name: str):
         if not question or question.lower() == "exit":
             break
 
-        query_vector = ollama.embed(model=EMBED_MODEL, input=question)["embeddings"][0]
-        chunks = search(collection, query_vector, TOP_K)
+        search_query = rewrite_query(question, history, CHAT_MODEL)
+        if search_query != question:
+            print(f"  [rewritten: {search_query}]")
+
+        if search_mode == "hybrid":
+            chunks = hybrid_search(collection, bm25, all_docs, all_metas, search_query, TOP_K)
+        else:
+            chunks = semantic_search(collection, search_query, TOP_K)
         prompt = build_prompt(chunks, question, history=history)
 
         print("Assistant: ", end="", flush=True)

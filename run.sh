@@ -30,7 +30,8 @@ case "$1" in
         python main.py list
         ;;
     chat|"")
-        python main.py chat
+        shift || true
+        python main.py chat "$@"
         ;;
     *)
         echo "Usage: ./run.sh [ingest <pdf>|list|chat]"

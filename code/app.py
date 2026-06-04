@@ -6,6 +6,7 @@ import streamlit as st
 import ollama
 import chromadb
 from ingest import ingest
+from search import build_bm25_index, hybrid_search, rewrite_query
 
 # Module-level dict for background threads to write status into.
 # Background threads cannot access st.session_state (no ScriptRunContext).
@@ -33,13 +34,11 @@ def list_collections(client):
     return [c.name for c in client.list_collections()]
 
 
-def search(collection, query: str, top_k: int) -> list[dict]:
-    vector = ollama.embed(model=EMBED_MODEL, input=query)["embeddings"][0]
-    results = collection.query(query_embeddings=[vector], n_results=top_k)
-    chunks = []
-    for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
-        chunks.append({"text": doc, "page": meta["page"], "source": meta["source"]})
-    return chunks
+@st.cache_resource
+def get_bm25_index(collection_name: str):
+    """Build and cache the BM25 index for a collection. Rebuilt if collection changes."""
+    col = get_chroma_client().get_collection(name=collection_name)
+    return build_bm25_index(col)
 
 
 def build_prompt(chunks: list[dict], question: str, history: list[dict] = None) -> str:
@@ -213,8 +212,10 @@ if question := st.chat_input(f"Ask about {selected}..."):
         st.markdown(question)
 
     collection = client.get_collection(name=selected)
-    chunks = search(collection, question, TOP_K)
+    bm25, all_docs, all_metas = get_bm25_index(selected)
     history = st.session_state.messages[:-1]  # everything before the current question
+    search_query = rewrite_query(question, history, CHAT_MODEL)
+    chunks = hybrid_search(collection, bm25, all_docs, all_metas, search_query, TOP_K)
     prompt = build_prompt(chunks, question, history=history)
     sources = ", ".join(sorted({f"p.{c['page']}" for c in chunks}))
 

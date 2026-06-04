@@ -1,4 +1,5 @@
 chromadb
 ollama
 pymupdf
+rank_bm25
 streamlit

@@ -28,6 +28,17 @@ def cmd_chat(args):
         print("No ingested PDFs found. Run: python main.py ingest <path_to_pdf>")
         sys.exit(1)
 
+    # Parse --search flag
+    search_mode = "hybrid"
+    if "--search" in args:
+        idx = args.index("--search")
+        if idx + 1 < len(args) and args[idx + 1] in ("hybrid", "semantic"):
+            search_mode = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+        else:
+            print("Error: --search requires 'hybrid' or 'semantic'")
+            sys.exit(1)
+
     if args:
         collection_name = args[0]
     elif len(available) == 1:
@@ -44,7 +55,7 @@ def cmd_chat(args):
             print("Invalid choice.")
             sys.exit(1)
 
-    chat(collection_name)
+    chat(collection_name, search_mode=search_mode)
 
 
 def cmd_list():
@@ -61,9 +72,13 @@ USAGE = """
 Chat with PDF — local LLM powered
 
 Commands:
-  python main.py ingest <path_to_pdf>   Parse, embed, and store a PDF
-  python main.py chat [collection]      Start a chat session
-  python main.py list                   Show all ingested PDFs
+  python main.py ingest <path_to_pdf>                    Parse, embed, and store a PDF
+  python main.py chat [collection] [--search hybrid|semantic]  Start a chat session
+  python main.py list                                    Show all ingested PDFs
+
+Search modes (default: hybrid):
+  hybrid    — combines vector + BM25 keyword search via RRF (better recall)
+  semantic  — vector search only, faster startup
 """
 
 COMMANDS = {
