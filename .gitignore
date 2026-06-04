@@ -1,0 +1,20 @@
+# Python
+code/venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# App data — user-specific, not for repo
+database/
+pdfs/*
+!pdfs/.gitkeep
+
+# macOS
+.DS_Store
+
+# Models — managed by Ollama (~/.ollama/models), never in project
+models/*
+!models/.gitkeep
+
+# Notes
+NOTES.md
