@@ -6,7 +6,7 @@ import streamlit as st
 import ollama
 import chromadb
 from ingest import ingest
-from search import build_bm25_index, hybrid_search, rewrite_query
+from search import build_bm25_index, hybrid_search, rewrite_query, retrieval_confidence
 
 # Module-level dict for background threads to write status into.
 # Background threads cannot access st.session_state (no ScriptRunContext).
@@ -203,7 +203,8 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg["role"] == "assistant" and "sources" in msg:
-            st.caption(f"Sources: {msg['sources']}")
+            confidence_part = f"   |   Retrieval confidence: {msg['confidence']}" if "confidence" in msg else ""
+            st.caption(f"Sources: {msg['sources']}{confidence_part}")
 
 # --- Chat input ---
 if question := st.chat_input(f"Ask about {selected}..."):
@@ -214,10 +215,16 @@ if question := st.chat_input(f"Ask about {selected}..."):
     collection = client.get_collection(name=selected)
     bm25, all_docs, all_metas = get_bm25_index(selected)
     history = st.session_state.messages[:-1]  # everything before the current question
+    if question.startswith("//"):
+        question = question[2:].strip()
+        st.session_state.messages[-1]["content"] = question  # store cleaned question
+        history = []  # ignore prior context for retrieval and generation
     search_query = rewrite_query(question, history, CHAT_MODEL)
     chunks = hybrid_search(collection, bm25, all_docs, all_metas, search_query, TOP_K)
     prompt = build_prompt(chunks, question, history=history)
     sources = ", ".join(sorted({f"p.{c['page']}" for c in chunks}))
+    pct, label = retrieval_confidence(chunks)
+    confidence_str = f"{label} ({pct}%)"
 
     with st.chat_message("assistant"):
         response_box = st.empty()
@@ -226,10 +233,11 @@ if question := st.chat_input(f"Ask about {selected}..."):
             full_response += part["response"]
             response_box.markdown(full_response + "▌")
         response_box.markdown(full_response)
-        st.caption(f"Sources: {sources}")
+        st.caption(f"Sources: {sources}   |   Retrieval confidence: {confidence_str}")
 
     st.session_state.messages.append({
         "role": "assistant",
         "content": full_response,
         "sources": sources,
+        "confidence": confidence_str,
     })

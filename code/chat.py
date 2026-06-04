@@ -1,7 +1,7 @@
 import os
 import ollama
 import chromadb
-from search import build_bm25_index, hybrid_search, semantic_search, rewrite_query
+from search import build_bm25_index, hybrid_search, semantic_search, rewrite_query, retrieval_confidence
 
 CHAT_MODEL = "llama3.1:8b"
 TOP_K = 10
@@ -66,6 +66,11 @@ def chat(collection_name: str, search_mode: str = "hybrid"):
         if not question or question.lower() == "exit":
             break
 
+        if question.startswith("//"):
+            question = question[2:].strip()
+            history = []
+            print("  [new topic]")
+
         search_query = rewrite_query(question, history, CHAT_MODEL)
         if search_query != question:
             print(f"  [rewritten: {search_query}]")
@@ -84,7 +89,8 @@ def chat(collection_name: str, search_mode: str = "hybrid"):
         print()
 
         sources = {f"p.{c['page']}" for c in chunks}
-        print(f"  [sources: {', '.join(sorted(sources))}]\n")
+        pct, label = retrieval_confidence(chunks)
+        print(f"  [sources: {', '.join(sorted(sources))}  |  confidence: {label} ({pct}%)]\n")
 
         history.append({"role": "user", "content": question})
         history.append({"role": "assistant", "content": full_response})
