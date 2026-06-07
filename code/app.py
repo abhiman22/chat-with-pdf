@@ -5,7 +5,7 @@ import threading
 import streamlit as st
 import ollama
 import chromadb
-from ingest import ingest
+from ingest import ingest, ingest_folder
 from search import build_bm25_index, hybrid_search, rewrite_query, retrieval_confidence
 
 # Module-level dict for background threads to write status into.
@@ -42,7 +42,7 @@ def get_bm25_index(collection_name: str):
 
 
 def build_prompt(chunks: list[dict], question: str, history: list[dict] = None) -> str:
-    context = "\n\n---\n\n".join(f"[Page {c['page']}] {c['text']}" for c in chunks)
+    context = "\n\n---\n\n".join(f"[{c['source']} p.{c['page']}] {c['text']}" for c in chunks)
 
     history_text = ""
     if history:
@@ -54,8 +54,10 @@ def build_prompt(chunks: list[dict], question: str, history: list[dict] = None) 
         history_text = "\n\nConversation so far:\n" + "\n".join(lines)
 
     return (
-        f"Use only the context below to answer the question. "
-        f"If the answer is not in the context, say you don't know.\n\n"
+        f"Answer using only the context below. "
+        f"Do not infer, extrapolate, or use any knowledge not present in the context. "
+        f"If the context partially answers the question, say what you found and what is missing. "
+        f"If the answer is not in the context at all, say 'I don't know based on the provided document.'\n\n"
         f"Context:\n{context}"
         f"{history_text}\n\n"
         f"Question: {question}\n\n"
@@ -71,9 +73,12 @@ def sanitize_collection_name(filename: str) -> str:
     return (name or "pdf")[:512].ljust(3, "_")
 
 
-def run_ingest_thread(pdf_path: str, collection_name: str):
+def run_ingest_thread(path: str, collection_name: str, is_folder: bool = False):
     try:
-        ingest(pdf_path, collection_name_override=collection_name)
+        if is_folder:
+            ingest_folder(path, collection_name_override=collection_name)
+        else:
+            ingest(path, collection_name_override=collection_name)
         _ingest_status[collection_name] = "done"
     except Exception as e:
         _ingest_status[collection_name] = f"error: {e}"
@@ -90,6 +95,10 @@ if "saved_files" not in st.session_state:
     st.session_state.saved_files = {}  # {collection_name: pdf_path}
 if "pending_toasts" not in st.session_state:
     st.session_state.pending_toasts = []
+if "generating" not in st.session_state:
+    st.session_state.generating = False
+if "queued_question" not in st.session_state:
+    st.session_state.queued_question = None
 
 # --- Sync background thread results into session state ---
 for _name, _status in list(_ingest_status.items()):
@@ -145,6 +154,45 @@ with st.sidebar:
                 )
                 thread.start()
                 st.rerun()
+
+    # --- Folder ingestion section ---
+    st.divider()
+    st.subheader("Ingest a folder")
+    st.caption("Place multiple PDFs in a subfolder of `pdfs/` to chat with them together.")
+
+    subfolders = sorted(
+        d for d in os.listdir(PDFS_PATH)
+        if os.path.isdir(os.path.join(PDFS_PATH, d))
+    )
+
+    if subfolders:
+        existing_collections = list_collections(client)
+        for folder in subfolders:
+            folder_path = os.path.join(PDFS_PATH, folder)
+            collection_name = sanitize_collection_name(folder)
+            pdf_count = len([f for f in os.listdir(folder_path) if f.lower().endswith(".pdf")])
+
+            if st.session_state.ingest_jobs.get(collection_name) == "running":
+                st.info(f"⏳ Ingesting **{collection_name}**...")
+            elif collection_name in existing_collections:
+                st.success(f"✓ `{collection_name}` ({pdf_count} PDFs)")
+            else:
+                col1, col2 = st.columns([3, 1])
+                col1.markdown(f"`{folder}` — {pdf_count} PDF(s)")
+                if col2.button("Ingest", key=f"ingest_folder_{folder}"):
+                    st.session_state.ingest_jobs[collection_name] = "running"
+                    thread = threading.Thread(
+                        target=run_ingest_thread,
+                        args=(folder_path, collection_name),
+                        kwargs={"is_folder": True},
+                        daemon=True,
+                    )
+                    thread.start()
+                    st.rerun()
+    else:
+        st.caption("No subfolders found in `pdfs/`.")
+
+    st.divider()
 
     # --- Running jobs status ---
     running_jobs = [n for n, s in st.session_state.ingest_jobs.items() if s == "running"]
@@ -207,31 +255,46 @@ for msg in st.session_state.messages:
             st.caption(f"Sources: {msg['sources']}{confidence_part}")
 
 # --- Chat input ---
-if question := st.chat_input(f"Ask about {selected}..."):
-    st.session_state.messages.append({"role": "user", "content": question})
+question_input = st.chat_input(f"Ask about {selected}...", disabled=st.session_state.generating)
+
+if question_input:
+    st.session_state.messages.append({"role": "user", "content": question_input})
+    st.session_state.queued_question = question_input
+    st.session_state.generating = True
+    st.rerun()
+
+if st.session_state.generating and st.session_state.queued_question:
+    question = st.session_state.queued_question
+
     with st.chat_message("user"):
         st.markdown(question)
 
     collection = client.get_collection(name=selected)
     bm25, all_docs, all_metas = get_bm25_index(selected)
-    history = st.session_state.messages[:-1]  # everything before the current question
+    history = st.session_state.messages[:-1]
     if question.startswith("//"):
         question = question[2:].strip()
-        st.session_state.messages[-1]["content"] = question  # store cleaned question
-        history = []  # ignore prior context for retrieval and generation
+        st.session_state.messages[-1]["content"] = question
+        history = []
     search_query = rewrite_query(question, history, CHAT_MODEL)
     chunks = hybrid_search(collection, bm25, all_docs, all_metas, search_query, TOP_K)
     prompt = build_prompt(chunks, question, history=history)
-    sources = ", ".join(sorted({f"p.{c['page']}" for c in chunks}))
+    pages_by_source = {}
+    for c in chunks:
+        pages_by_source.setdefault(c["source"], set()).add(c["page"])
+    sources = ", ".join(
+        f"{src} pp.{','.join(str(p) for p in sorted(pages))}"
+        for src, pages in sorted(pages_by_source.items())
+    )
     pct, label = retrieval_confidence(chunks)
     confidence_str = f"{label} ({pct}%)"
 
     with st.chat_message("assistant"):
         response_box = st.empty()
         full_response = ""
-        for part in ollama.generate(model=CHAT_MODEL, prompt=prompt, stream=True):
+        for part in ollama.generate(model=CHAT_MODEL, prompt=prompt, stream=True, options={"temperature": 0.5}):
             full_response += part["response"]
-            response_box.markdown(full_response + "▌")
+            response_box.markdown(full_response + '<span style="opacity:0.2"> |</span>', unsafe_allow_html=True)
         response_box.markdown(full_response)
         st.caption(f"Sources: {sources}   |   Retrieval confidence: {confidence_str}")
 
@@ -241,3 +304,6 @@ if question := st.chat_input(f"Ask about {selected}..."):
         "sources": sources,
         "confidence": confidence_str,
     })
+    st.session_state.generating = False
+    st.session_state.queued_question = None
+    st.rerun()

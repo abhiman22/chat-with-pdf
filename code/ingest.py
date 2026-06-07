@@ -57,6 +57,18 @@ def embed(text: str) -> list[float]:
     return response["embeddings"][0]
 
 
+def _store_chunks(collection, chunks: list[dict], id_prefix: str, source_name: str):
+    """Embed and upsert chunks into a ChromaDB collection."""
+    for chunk in chunks:
+        vector = embed(chunk["text"])
+        collection.upsert(
+            ids=[f"{id_prefix}_chunk_{chunk['chunk_index']}"],
+            embeddings=[vector],
+            documents=[chunk["text"]],
+            metadatas=[{"page": chunk["page"], "source": source_name}],
+        )
+
+
 def ingest(pdf_path: str, collection_name_override: str = None):
     pdf_name = collection_name_override or os.path.splitext(os.path.basename(pdf_path))[0].replace(" ", "_")
     print(f"Reading: {pdf_path}")
@@ -71,20 +83,47 @@ def ingest(pdf_path: str, collection_name_override: str = None):
     collection = client.get_or_create_collection(name=pdf_name)
 
     print(f"  Embedding and storing chunks...")
-    for chunk in chunks:
-        vector = embed(chunk["text"])
-        collection.add(
-            ids=[f"{pdf_name}_chunk_{chunk['chunk_index']}"],
-            embeddings=[vector],
-            documents=[chunk["text"]],
-            metadatas=[{"page": chunk["page"], "source": pdf_name}],
-        )
+    _store_chunks(collection, chunks, id_prefix=pdf_name, source_name=pdf_name)
 
     print(f"Done. Collection '{pdf_name}' stored in {DB_PATH}")
 
 
+def ingest_folder(folder_path: str, collection_name_override: str = None):
+    """Ingest all PDFs in a folder into a single ChromaDB collection."""
+    folder_name = collection_name_override or os.path.basename(folder_path.rstrip("/\\")).replace(" ", "_")
+    pdf_files = sorted(f for f in os.listdir(folder_path) if f.lower().endswith(".pdf"))
+
+    if not pdf_files:
+        print(f"No PDF files found in {folder_path}")
+        return
+
+    print(f"Ingesting folder '{folder_name}' ({len(pdf_files)} PDFs)...")
+    client = chromadb.PersistentClient(path=DB_PATH)
+    collection = client.get_or_create_collection(name=folder_name)
+
+    for pdf_file in pdf_files:
+        pdf_path = os.path.join(folder_path, pdf_file)
+        source_name = os.path.splitext(pdf_file)[0].replace(" ", "_")
+        print(f"\n  [{source_name}]")
+
+        pages = extract_text(pdf_path)
+        print(f"    {len(pages)} pages extracted")
+
+        chunks = chunk_text(pages)
+        print(f"    {len(chunks)} chunks created")
+
+        print(f"    Embedding and storing chunks...")
+        _store_chunks(collection, chunks, id_prefix=f"{folder_name}_{source_name}", source_name=source_name)
+
+    print(f"\nDone. Collection '{folder_name}' stored in {DB_PATH}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python ingest.py <path_to_pdf>")
+        print("Usage: python ingest.py <path_to_pdf_or_folder>")
         sys.exit(1)
-    ingest(sys.argv[1])
+    target = sys.argv[1]
+    if os.path.isdir(target):
+        ingest_folder(target)
+    else:
+        ingest(target)

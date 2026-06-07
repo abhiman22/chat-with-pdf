@@ -13,10 +13,15 @@ def list_collections():
 
 def cmd_ingest(args):
     if not args:
-        print("Error: provide a PDF path.  e.g.  python main.py ingest ../pdfs/book.pdf")
+        print("Error: provide a PDF path or folder.  e.g.  python main.py ingest ../pdfs/book.pdf")
         sys.exit(1)
-    from ingest import ingest
-    ingest(args[0])
+    target = args[0]
+    if os.path.isdir(target):
+        from ingest import ingest_folder
+        ingest_folder(target)
+    else:
+        from ingest import ingest
+        ingest(target)
 
 
 def cmd_chat(args):
@@ -72,13 +77,20 @@ USAGE = """
 Chat with PDF — local LLM powered
 
 Commands:
-  python main.py ingest <path_to_pdf>                    Parse, embed, and store a PDF
+  python main.py ingest <path_to_pdf>                         Parse, embed, and store a single PDF
+  python main.py ingest <path_to_folder>                      Ingest all PDFs in a folder as one collection
   python main.py chat [collection] [--search hybrid|semantic]  Start a chat session
-  python main.py list                                    Show all ingested PDFs
+  python main.py list                                         Show all ingested collections
 
 Search modes (default: hybrid):
   hybrid    — combines vector + BM25 keyword search via RRF (better recall)
   semantic  — vector search only, faster startup
+
+Folder ingestion example:
+  mkdir ../pdfs/my_books
+  cp book1.pdf book2.pdf ../pdfs/my_books/
+  python main.py ingest ../pdfs/my_books
+  python main.py chat my_books
 """
 
 COMMANDS = {

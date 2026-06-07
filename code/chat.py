@@ -1,4 +1,8 @@
 import os
+import time
+import itertools
+import threading
+import readline  # noqa: F401 — enables arrow keys and line editing in input()
 import ollama
 import chromadb
 from search import build_bm25_index, hybrid_search, semantic_search, rewrite_query, retrieval_confidence
@@ -15,7 +19,7 @@ def list_collections(client: chromadb.PersistentClient) -> list[str]:
 
 def build_prompt(chunks: list[dict], question: str, history: list[dict] = None) -> str:
     context = "\n\n---\n\n".join(
-        f"[Page {c['page']}] {c['text']}" for c in chunks
+        f"[{c['source']} p.{c['page']}] {c['text']}" for c in chunks
     )
 
     history_text = ""
@@ -28,8 +32,10 @@ def build_prompt(chunks: list[dict], question: str, history: list[dict] = None) 
         history_text = "\n\nConversation so far:\n" + "\n".join(lines)
 
     return (
-        f"Use only the context below to answer the question. "
-        f"If the answer is not in the context, say you don't know.\n\n"
+        f"Answer using only the context below. "
+        f"Do not infer, extrapolate, or use any knowledge not present in the context. "
+        f"If the context partially answers the question, say what you found and what is missing. "
+        f"If the answer is not in the context at all, say 'I don't know based on the provided document.'\n\n"
         f"Context:\n{context}"
         f"{history_text}\n\n"
         f"Question: {question}\n\n"
@@ -81,14 +87,34 @@ def chat(collection_name: str, search_mode: str = "hybrid"):
             chunks = semantic_search(collection, search_query, TOP_K)
         prompt = build_prompt(chunks, question, history=history)
 
-        print("Assistant: ", end="", flush=True)
+        stop_anim = threading.Event()
+
+        def _animate():
+            for dots in itertools.cycle(["   ", ".  ", ".. ", "..."]):
+                if stop_anim.is_set():
+                    break
+                print(f"\rAssistant: {dots}", end="", flush=True)
+                time.sleep(0.35)
+
+        anim_thread = threading.Thread(target=_animate, daemon=True)
+        anim_thread.start()
+
         full_response = ""
-        for part in ollama.generate(model=CHAT_MODEL, prompt=prompt, stream=True):
-            print(part["response"], end="", flush=True)
+        gen = ollama.generate(model=CHAT_MODEL, prompt=prompt, stream=True, options={"temperature": 0.5})
+        for i, part in enumerate(gen):
+            if i == 0:
+                stop_anim.set()
+                anim_thread.join()
+                print(f"\rAssistant: {part['response']}", end="", flush=True)
+            else:
+                print(part["response"], end="", flush=True)
             full_response += part["response"]
         print()
 
-        sources = {f"p.{c['page']}" for c in chunks}
+        pages_by_source = {}
+        for c in chunks:
+            pages_by_source.setdefault(c["source"], set()).add(c["page"])
+        sources = {f"{src} pp.{','.join(str(p) for p in sorted(pages))}" for src, pages in pages_by_source.items()}
         pct, label = retrieval_confidence(chunks)
         print(f"  [sources: {', '.join(sorted(sources))}  |  confidence: {label} ({pct}%)]\n")
 
